@@ -1,14 +1,14 @@
 {
-  "name": "p2p-signaling-server",
-  "type": "module",
+  "name": "peerflow-signaling",
   "version": "1.0.0",
-  "engines": {
-    "node": ">=18.x"
-  },
+  "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node api/ws.js"
   },
   "dependencies": {
     "ws": "^8.17.0"
+  },
+  "engines": {
+    "node": ">=18.x"
   }
 }
