@@ -31,12 +31,11 @@ export default function P2PApp() {
     const animals = ['Lion', 'Tiger', 'Bear', 'Eagle', 'Wolf', 'Dolphin', 'Fox', 'Hawk'];
     const nature = ['Mountain', 'River', 'Forest', 'Ocean', 'Desert', 'Sky', 'Valley', 'Canyon'];
     
-    const categories = [colors, animals, nature];
-    const randomCategory = categories[Math.floor(Math.random() * categories.length)];
+    const randomCategory = Math.random() > 0.5 ? animals : nature;
     const randomItem = randomCategory[Math.floor(Math.random() * randomCategory.length)];
-    const randomSuffix = Math.random().toString(36).substr(2, 4).toUpperCase();
+    const randomColor = colors[Math.floor(Math.random() * colors.length)];
     
-    return `${randomItem}${randomSuffix}`;
+    return `${randomColor}${randomItem}`;
   };
 
   // Detect device type
@@ -52,41 +51,46 @@ export default function P2PApp() {
   };
 
   // Connect to WebSocket server
-
-const connectWebSocket = () => {
-  // Determine WebSocket URL based on current host
-  let wsUrl;
-  
-  // Use production backend when on peerflow.vercel.app
-  if (window.location.hostname === 'peerflow.vercel.app') {
-    wsUrl = 'wss://peerflow.vercel.app/api/ws';
-  } 
-  // Use local backend during development
-  else {
-    wsUrl = 'ws://localhost:3000/api/ws';
-  }
-  
-  console.log('Connecting to WebSocket:', wsUrl);
-  wsRef.current = new WebSocket(wsUrl);
+  const connectWebSocket = () => {
+    // Determine WebSocket URL based on current host
+    let wsUrl;
+    
+    if (window.location.hostname === 'peerflow.vercel.app') {
+      // Production URL (replace with your actual backend URL)
+      wsUrl = 'wss://your-backend-domain.com/ws';
+    } else {
+      // Local development
+      wsUrl = 'ws://localhost:8000/ws';
+    }
+    
+    console.log(`Connecting to WebSocket: ${wsUrl}`);
+    wsRef.current = new WebSocket(wsUrl);
+    setConnectionStatus('connecting');
     
     wsRef.current.onopen = () => {
       console.log('WebSocket connected');
       setConnectionStatus('connected');
+      
       // Register with signaling server
+      const name = generatePeerName();
       wsRef.current.send(JSON.stringify({
         type: 'register',
         peerId: peerIdRef.current,
         info: {
-          name: peerNameRef.current,
+          name: name,
           deviceType: deviceTypeRef.current
         }
       }));
+      
+      setPeerName(name);
       startHeartbeat();
     };
     
     wsRef.current.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        console.log('Received message:', data);
+        
         switch (data.type) {
           case 'peer-list':
             handlePeerList(data.peers);
@@ -144,17 +148,14 @@ const connectWebSocket = () => {
   // Initialize peer
   useEffect(() => {
     const id = `peer_${Math.random().toString(36).substr(2, 8)}`;
-    const name = generatePeerName();
     const device = detectDeviceType();
     
     // Set refs for consistent access
     peerIdRef.current = id;
-    peerNameRef.current = name;
     deviceTypeRef.current = device;
     
     // Update state
     setPeerId(id);
-    setPeerName(name);
     setDeviceType(device);
     
     // Connect to WebSocket server
@@ -191,6 +192,8 @@ const connectWebSocket = () => {
 
   const handleSignal = async (sourcePeer, signal) => {
     try {
+      console.log('Received signal:', signal.type, 'from', sourcePeer);
+      
       switch (signal.type) {
         case 'offer':
           await handleWebRTCOffer(sourcePeer, signal);
@@ -268,6 +271,7 @@ const connectWebSocket = () => {
     
     connection.onicecandidate = (event) => {
       if (event.candidate && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        console.log('Sending ICE candidate to', remotePeerId);
         wsRef.current.send(JSON.stringify({
           type: 'signal',
           targetPeer: remotePeerId,
@@ -318,10 +322,12 @@ const connectWebSocket = () => {
     };
     
     if (isInitiator) {
+      console.log('Creating data channel for', remotePeerId);
       const dataChannel = connection.createDataChannel('communication', { ordered: true });
       setupDataChannel(dataChannel, remotePeerId);
     } else {
       connection.ondatachannel = (event) => {
+        console.log('Received data channel from', remotePeerId);
         setupDataChannel(event.channel, remotePeerId);
       };
     }
@@ -382,6 +388,7 @@ const connectWebSocket = () => {
             return newMessages;
           });
         } else if (parsedData.type === 'file-info') {
+          console.log('Received file info:', parsedData);
           pendingFiles.current.set(parsedData.fileId, {
             name: parsedData.name,
             size: parsedData.size,
@@ -403,10 +410,14 @@ const connectWebSocket = () => {
         offset += 4;
         const chunk = data.slice(offset);
         const fileInfo = pendingFiles.current.get(fileId);
+        
         if (fileInfo) {
+          console.log(`Received chunk ${chunkIndex} of ${fileInfo.totalChunks} for ${fileId}`);
           fileInfo.chunks[chunkIndex] = chunk;
           fileInfo.receivedChunks++;
+          
           if (fileInfo.receivedChunks === fileInfo.totalChunks) {
+            console.log('All chunks received for', fileId);
             const blob = new Blob(fileInfo.chunks, { type: fileInfo.type });
             setFiles(prev => {
               const newFiles = new Map(prev);
@@ -433,6 +444,7 @@ const connectWebSocket = () => {
   // Handle WebRTC offer
   const handleWebRTCOffer = async (remotePeerId, offer) => {
     try {
+      console.log('Handling offer from', remotePeerId);
       const connection = await createConnection(remotePeerId, false);
       await connection.setRemoteDescription(new RTCSessionDescription(offer));
       const answer = await connection.createAnswer();
@@ -456,6 +468,7 @@ const connectWebSocket = () => {
   // Handle WebRTC answer
   const handleWebRTCAnswer = async (remotePeerId, answer) => {
     try {
+      console.log('Handling answer from', remotePeerId);
       const connection = connections.current.get(remotePeerId);
       if (connection) {
         await connection.setRemoteDescription(new RTCSessionDescription({
@@ -471,6 +484,7 @@ const connectWebSocket = () => {
   // Handle WebRTC ICE candidate
   const handleWebRTCIce = async (remotePeerId, candidate) => {
     try {
+      console.log('Handling ICE candidate from', remotePeerId);
       const connection = connections.current.get(remotePeerId);
       if (connection && candidate) {
         await connection.addIceCandidate(new RTCIceCandidate(candidate));
@@ -488,6 +502,7 @@ const connectWebSocket = () => {
     }
 
     try {
+      console.log('Connecting to peer:', remotePeerId);
       const connection = await createConnection(remotePeerId, true);
       const offer = await connection.createOffer();
       await connection.setLocalDescription(offer);
@@ -552,6 +567,7 @@ const connectWebSocket = () => {
       alert('Not connected to peer. Please wait for connection to establish.');
       return;
     }
+    
     const fileId = `${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
     const chunkSize = 16 * 1024; // 16KB chunks
     const arrayBuffer = await file.arrayBuffer();
@@ -567,6 +583,8 @@ const connectWebSocket = () => {
         fileType: file.type,
         totalChunks
       }));
+      
+      console.log(`Sending file: ${file.name} (${totalChunks} chunks)`);
       
       // Send file chunks
       for (let i = 0; i < totalChunks; i++) {
@@ -587,6 +605,8 @@ const connectWebSocket = () => {
         dataChannel.send(payload.buffer);
         await new Promise(resolve => setTimeout(resolve, 5)); // Throttle sends
       }
+      
+      console.log('File sent successfully');
       
       // Add to local file list
       setFiles(prev => {
