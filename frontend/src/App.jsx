@@ -57,7 +57,7 @@ export default function P2PApp() {
     
     if (window.location.hostname === 'peerflow.vercel.app') {
       // Production URL (replace with your actual backend URL)
-      wsUrl = 'wss://your-backend-domain.com/ws';
+      wsUrl = 'wss://peerflow-backend.yourdomain.com/ws';
     } else {
       // Local development
       wsUrl = 'ws://localhost:8000/ws';
