@@ -7,7 +7,7 @@
     ],
     "routes": [
         {
-            "src": "/ws",
+            "src": "/(.*)",
             "dest": "api/index.py"
         }
     ]
