@@ -133,6 +133,16 @@ async def websocket_endpoint(websocket: WebSocket):
         if peer_id and peer_id in connections:
             del connections[peer_id]
 
+@app.get("/")
+async def root():
+    return {
+        "message": "PeerFlow Signaling Server",
+        "endpoints": {
+            "websocket": "/ws",
+            "health": "/health"
+        }
+    }
+
 @app.get("/health")
 def health_check():
     """Health check endpoint"""
