@@ -1,22 +1,14 @@
 {
-  "builds": [
-    {
-      "src": "api/index.py",
-      "use": "@vercel/python"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/ws",
-      "dest": "api/index.py",
-      "headers": {
-        "Connection": "Upgrade",
-        "Upgrade": "websocket"
-      }
-    },
-    {
-      "src": "/health",
-      "dest": "api/index.py"
-    }
-  ]
+    "builds": [
+        {
+            "src": "api/index.py",
+            "use": "@vercel/python"
+        }
+    ],
+    "routes": [
+        {
+            "src": "/ws",
+            "dest": "api/index.py"
+        }
+    ]
 }
