@@ -1,51 +1,25 @@
 import { WebSocketServer } from 'ws';
-import https from 'https';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import http from 'http';
+import express from 'express';
 
-// Get current directory
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const app = express();
+const server = http.createServer(app);
+const PORT = process.env.PORT || 3000;
 
-// Configuration
-const PORT = process.env.PORT || 8080;
-const SSL_ENABLED = process.env.NODE_ENV === 'production';
-const HEARTBEAT_INTERVAL = 10000; // 10 seconds
+// Middleware for Vercel health checks
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
 
+// Create WebSocket server
+const wss = new WebSocketServer({ server, path: '/ws' });
 const peers = new Map();
-let wss;
 
-if (SSL_ENABLED) {
-  // Production - use SSL for secure WebSocket (wss)
-  const sslOptions = {
-    key: fs.readFileSync(path.join(__dirname, 'ssl', 'private.key')),
-    cert: fs.readFileSync(path.join(__dirname, 'ssl', 'certificate.crt'))
-  };
-  
-  const server = https.createServer(sslOptions);
-  wss = new WebSocketServer({ 
-    server,
-    path: '/ws'
-  });
-  
-  server.listen(PORT, () => {
-    console.log(`Secure WebSocket server running on wss://0.0.0.0:${PORT}/ws`);
-  });
-} else {
-  // Development
-  wss = new WebSocketServer({ 
-    port: PORT,
-    path: '/ws'
-  });
-  console.log(`WebSocket server running on ws://localhost:${PORT}/ws`);
-}
-
-// Heartbeat system to detect dead connections
+// Enhanced heartbeat system
 const heartbeatInterval = setInterval(() => {
   const now = Date.now();
   peers.forEach((peer, id) => {
-    if (now - peer.lastSeen > 30000) { // 30 seconds timeout
+    if (now - peer.lastSeen > 45000) {
       console.log(`Removing inactive peer: ${id}`);
       try {
         peer.ws.close(1001, 'Connection timeout');
@@ -56,16 +30,14 @@ const heartbeatInterval = setInterval(() => {
       broadcastPeerList();
     }
   });
-}, HEARTBEAT_INTERVAL);
+}, 15000);
 
 wss.on('connection', (ws, req) => {
   const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
   console.log(`New connection from: ${ip}`);
   
   let peerId = null;
-  
-  // Initial peer info
-  const peerInfo = {
+  const connectionInfo = {
     ws,
     lastSeen: Date.now(),
     ip,
@@ -73,16 +45,22 @@ wss.on('connection', (ws, req) => {
     deviceType: ''
   };
 
+  // Send initial peer list immediately
+  ws.send(JSON.stringify({
+    type: 'peer-list',
+    peers: formatPeerList()
+  }));
+
   ws.on('message', (rawData) => {
     try {
       const data = JSON.parse(rawData);
-      peerInfo.lastSeen = Date.now();
+      connectionInfo.lastSeen = Date.now();
       
       switch (data.type) {
         case 'register':
           peerId = data.peerId;
           peers.set(peerId, {
-            ...peerInfo,
+            ...connectionInfo,
             name: data.info.name || `Unknown-${peerId.slice(-4)}`,
             deviceType: data.info.deviceType || 'desktop'
           });
@@ -93,7 +71,7 @@ wss.on('connection', (ws, req) => {
         case 'signal':
           if (data.targetPeer && peers.has(data.targetPeer)) {
             const targetPeer = peers.get(data.targetPeer);
-            if (targetPeer.ws.readyState === 1) { // OPEN state
+            if (targetPeer.ws.readyState === 1) {
               targetPeer.ws.send(JSON.stringify({
                 type: 'signal',
                 sourcePeer: peerId,
@@ -103,28 +81,12 @@ wss.on('connection', (ws, req) => {
           }
           break;
           
-        case 'heartbeat':
-          // Already handled by lastSeen update
-          break;
-          
-        case 'goodbye':
-          if (peerId) {
-            peers.delete(peerId);
-            broadcastPeerList();
-            console.log(`Peer disconnected: ${peerId}`);
-          }
-          break;
-          
         default:
-          console.warn(`Unknown message type: ${data.type}`);
+          console.log(`Received ${data.type} from ${peerId || 'unknown peer'}`);
       }
     } catch (error) {
       console.error('Error processing message:', error);
     }
-  });
-
-  ws.on('error', (error) => {
-    console.error(`WebSocket error for ${peerId || 'unknown peer'}:`, error.message);
   });
 
   ws.on('close', () => {
@@ -135,57 +97,65 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  // Send initial peer list
-  ws.send(JSON.stringify({
-    type: 'peer-list',
-    peers: formatPeerList()
-  }));
+  ws.on('error', (error) => {
+    console.error(`WebSocket error: ${error.message}`);
+  });
 });
 
-// Format peer list for clients
 function formatPeerList() {
   return Array.from(peers.entries()).map(([id, info]) => ({
     id,
     name: info.name,
     deviceType: info.deviceType,
-    status: 'available',
-    lastSeen: info.lastSeen
+    status: 'available'
   }));
 }
 
-// Broadcast updated peer list to all connected clients
 function broadcastPeerList() {
   const peerList = formatPeerList();
+  console.log(`Broadcasting to ${peers.size} peers`);
   
   peers.forEach((peer) => {
-    if (peer.ws.readyState === 1) { // OPEN state
+    if (peer.ws.readyState === 1) {
       try {
         peer.ws.send(JSON.stringify({
           type: 'peer-list',
           peers: peerList
         }));
       } catch (e) {
-        console.error('Error broadcasting to peer:', peer.id, e);
+        console.error(`Error broadcasting to ${peer.id}:`, e);
       }
     }
   });
 }
 
-// Cleanup on server shutdown
-process.on('SIGINT', () => {
-  clearInterval(heartbeatInterval);
-  wss.close(() => {
+// Start server when running locally
+if (process.env.NODE_ENV !== 'production') {
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+
+  process.on('SIGINT', () => {
+    clearInterval(heartbeatInterval);
+    wss.close();
+    server.close();
     console.log('Server shutdown complete');
     process.exit(0);
   });
-});
+}
 
-// Handle uncaught exceptions
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
+// Export for Vercel serverless
+export default (req, res) => {
+  if (req.url === '/health') {
+    res.status(200).send('OK');
+    return;
+  }
+  
+  if (req.headers.upgrade === 'websocket') {
+    wss.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => {
+      wss.emit('connection', ws, req);
+    });
+  } else {
+    res.status(426).send('Upgrade Required');
+  }
+};

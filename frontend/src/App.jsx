@@ -52,21 +52,22 @@ export default function P2PApp() {
   };
 
   // Connect to WebSocket server
-  const connectWebSocket = () => {
-    // Determine WebSocket URL based on current host
-    let wsUrl;
-    
-    // Use production backend when on peerflow.vercel.app
-    if (window.location.hostname === 'peerflow.vercel.app') {
-      wsUrl = 'wss://peerflow-backend.vercel.app/ws';
-    } 
-    // Use local backend during development
-    else {
-      wsUrl = 'ws://localhost:8080/ws';
-    }
-    
-    wsRef.current = new WebSocket(wsUrl);
-    setConnectionStatus('connecting');
+
+const connectWebSocket = () => {
+  // Determine WebSocket URL based on current host
+  let wsUrl;
+  
+  // Use production backend when on peerflow.vercel.app
+  if (window.location.hostname === 'peerflow.vercel.app') {
+    wsUrl = 'wss://peerflow.vercel.app/api/ws';
+  } 
+  // Use local backend during development
+  else {
+    wsUrl = 'ws://localhost:3000/api/ws';
+  }
+  
+  console.log('Connecting to WebSocket:', wsUrl);
+  wsRef.current = new WebSocket(wsUrl);
     
     wsRef.current.onopen = () => {
       console.log('WebSocket connected');
