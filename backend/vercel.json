@@ -1,35 +1,14 @@
 {
   "builds": [
     {
-      "src": "app/index.py",
+      "src": "api/index.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
-      "src": "/ws",
-      "dest": "app/index.py",
-      "headers": {
-        "Connection": "Upgrade",
-        "Upgrade": "websocket"
-      }
-    },
-    {
-      "src": "/health",
+      "src": "/(.*)",
       "dest": "api/index.py"
-    }
-  ],
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "app/index.py"
-    }
-  ],
-  "errorRoutes": [
-    {
-      "src": "/.*",
-      "status": 404,
-      "dest": "/404"
     }
   ]
 }

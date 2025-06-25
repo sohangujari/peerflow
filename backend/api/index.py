@@ -7,12 +7,21 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List
 
+# Get port from environment variable or default to 8000
+PORT = int(os.getenv("PORT", 8000))
+
 app = FastAPI()
 
-# Enable CORS for all origins
+# Enable CORS for production and development
+origins = [
+    "https://peerflow.vercel.app",
+    "http://localhost:3000",
+    "http://localhost:8000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://peerflow.vercel.app"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -135,19 +144,32 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.get("/")
 async def root():
+    """Root endpoint with service information"""
     return {
         "message": "PeerFlow Signaling Server",
+        "status": "running",
         "endpoints": {
             "websocket": "/ws",
-            "health": "/health"
+            "health_check": "/health"
+        },
+        "stats": {
+            "active_peers": len(peers),
+            "active_connections": len(connections)
         }
     }
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint"""
-    return {"status": "ok", "peers": len(peers)}
+    """Health check endpoint with detailed stats"""
+    return {
+        "status": "ok",
+        "peers": len(peers),
+        "connections": len(connections),
+        "uptime": time.time() - app_start_time
+    }
+
+# Track application start time
+app_start_time = time.time()
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
