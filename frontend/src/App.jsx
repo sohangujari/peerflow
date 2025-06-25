@@ -3,6 +3,7 @@ import { Send, File, Users, Wifi, Download, Copy, Check, RefreshCw, Smartphone, 
 
 export default function P2PApp() {
   const [peerId, setPeerId] = useState('');
+  const [peerName, setPeerName] = useState('');
   const [peers, setPeers] = useState(new Map());
   const [activePeer, setActivePeer] = useState(null);
   const [message, setMessage] = useState('');
@@ -11,6 +12,7 @@ export default function P2PApp() {
   const [isScanning, setIsScanning] = useState(false);
   const [copied, setCopied] = useState(false);
   const [deviceType, setDeviceType] = useState('desktop');
+  const [connectionStatus, setConnectionStatus] = useState('disconnected');
   
   const connections = useRef(new Map());
   const dataChannels = useRef(new Map());
@@ -18,117 +20,214 @@ export default function P2PApp() {
   const pendingFiles = useRef(new Map());
   const wsRef = useRef(null);
   const heartbeatInterval = useRef(null);
+  const reconnectTimeout = useRef(null);
+  const peerIdRef = useRef('');
+  const peerNameRef = useRef('');
+  const deviceTypeRef = useRef('');
+
+  // Generate memorable peer name
+  const generatePeerName = () => {
+    const colors = ['Red', 'Blue', 'Green', 'Yellow', 'Purple', 'Orange', 'Cyan', 'Magenta'];
+    const animals = ['Lion', 'Tiger', 'Bear', 'Eagle', 'Wolf', 'Dolphin', 'Fox', 'Hawk'];
+    const nature = ['Mountain', 'River', 'Forest', 'Ocean', 'Desert', 'Sky', 'Valley', 'Canyon'];
+    
+    const categories = [colors, animals, nature];
+    const randomCategory = categories[Math.floor(Math.random() * categories.length)];
+    const randomItem = randomCategory[Math.floor(Math.random() * randomCategory.length)];
+    const randomSuffix = Math.random().toString(36).substr(2, 4).toUpperCase();
+    
+    return `${randomItem}${randomSuffix}`;
+  };
 
   // Detect device type
   const detectDeviceType = () => {
     const userAgent = navigator.userAgent.toLowerCase();
-    if (/mobile|android|iphone|phone/i.test(userAgent)) {
+    if (/mobile|android|iphone|phone|ipod|blackberry|iemobile/i.test(userAgent)) {
       return 'mobile';
-    } else if (/tablet|ipad/i.test(userAgent)) {
+    } else if (/tablet|ipad|playbook|silk/i.test(userAgent)) {
       return 'tablet';
     } else {
       return 'laptop';
     }
   };
 
-  // Generate peer ID and initialize
-  useEffect(() => {
-    const id = `peer_${Math.random().toString(36).substr(2, 8)}`;
-    setPeerId(id);
-    setDeviceType(detectDeviceType());
+  // Connect to WebSocket server
+  const connectWebSocket = () => {
+    // Determine WebSocket URL based on current host
+    let wsUrl;
     
-    // Connect to WebSocket server
-    wsRef.current = new WebSocket('ws://localhost:8080');
+    // Use production backend when on peerflow.vercel.app
+    if (window.location.hostname === 'peerflow.vercel.app') {
+      wsUrl = 'wss://peerflow-backend.vercel.app/ws';
+    } 
+    // Use local backend during development
+    else {
+      wsUrl = 'ws://localhost:8080/ws';
+    }
+    
+    wsRef.current = new WebSocket(wsUrl);
+    setConnectionStatus('connecting');
     
     wsRef.current.onopen = () => {
+      console.log('WebSocket connected');
+      setConnectionStatus('connected');
       // Register with signaling server
       wsRef.current.send(JSON.stringify({
         type: 'register',
-        peerId: id,
+        peerId: peerIdRef.current,
         info: {
-          name: `${detectDeviceType().charAt(0).toUpperCase() + detectDeviceType().slice(1)} ${id.slice(-4)}`,
-          deviceType: detectDeviceType()
+          name: peerNameRef.current,
+          deviceType: deviceTypeRef.current
         }
       }));
-      startHeartbeat(id);
+      startHeartbeat();
     };
     
     wsRef.current.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      switch (data.type) {
-        case 'peer-list':
-          handlePeerList(data.peers);
-          break;
-        case 'signal':
-          handleSignal(data.sourcePeer, data.signal);
-          break;
+      try {
+        const data = JSON.parse(event.data);
+        switch (data.type) {
+          case 'peer-list':
+            handlePeerList(data.peers);
+            break;
+          case 'signal':
+            handleSignal(data.sourcePeer, data.signal);
+            break;
+        }
+      } catch (error) {
+        console.error('Error processing message:', error);
       }
     };
     
     wsRef.current.onerror = (error) => {
       console.error('WebSocket error:', error);
+      setConnectionStatus('error');
     };
+    
+    wsRef.current.onclose = (event) => {
+      console.log('WebSocket closed:', event.code, event.reason);
+      setConnectionStatus('disconnected');
+      
+      // Clear existing heartbeat
+      if (heartbeatInterval.current) {
+        clearInterval(heartbeatInterval.current);
+        heartbeatInterval.current = null;
+      }
+      
+      // Attempt reconnect after 3 seconds
+      if (!reconnectTimeout.current) {
+        reconnectTimeout.current = setTimeout(() => {
+          console.log('Attempting to reconnect WebSocket...');
+          reconnectTimeout.current = null;
+          connectWebSocket();
+        }, 3000);
+      }
+    };
+  };
+
+  const startHeartbeat = () => {
+    if (heartbeatInterval.current) {
+      clearInterval(heartbeatInterval.current);
+    }
+    
+    heartbeatInterval.current = setInterval(() => {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && peerIdRef.current) {
+        wsRef.current.send(JSON.stringify({
+          type: 'heartbeat',
+          peerId: peerIdRef.current
+        }));
+      }
+    }, 10000); // Send heartbeat every 10 seconds
+  };
+
+  // Initialize peer
+  useEffect(() => {
+    const id = `peer_${Math.random().toString(36).substr(2, 8)}`;
+    const name = generatePeerName();
+    const device = detectDeviceType();
+    
+    // Set refs for consistent access
+    peerIdRef.current = id;
+    peerNameRef.current = name;
+    deviceTypeRef.current = device;
+    
+    // Update state
+    setPeerId(id);
+    setPeerName(name);
+    setDeviceType(device);
+    
+    // Connect to WebSocket server
+    connectWebSocket();
     
     // Cleanup
     return () => {
       cleanup();
+      if (heartbeatInterval.current) {
+        clearInterval(heartbeatInterval.current);
+      }
+      if (reconnectTimeout.current) {
+        clearTimeout(reconnectTimeout.current);
+      }
     };
   }, []);
-
-  const startHeartbeat = (id) => {
-    heartbeatInterval.current = setInterval(() => {
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: 'heartbeat',
-          peerId: id
-        }));
-      }
-    }, 5000);
-  };
 
   const handlePeerList = (peerList) => {
     const newPeers = new Map();
     peerList.forEach(peer => {
-      newPeers.set(peer.id, {
-        id: peer.id,
-        name: peer.name,
-        deviceType: peer.deviceType || 'desktop',
-        lastSeen: Date.now(),
-        status: 'available'
-      });
+      // Don't add ourselves to the peer list
+      if (peer.id !== peerIdRef.current) {
+        newPeers.set(peer.id, {
+          id: peer.id,
+          name: peer.name,
+          deviceType: peer.deviceType || detectDeviceType(),
+          lastSeen: Date.now(),
+          status: 'available'
+        });
+      }
     });
     setPeers(newPeers);
   };
 
   const handleSignal = async (sourcePeer, signal) => {
-    switch (signal.type) {
-      case 'offer':
-        await handleWebRTCOffer(sourcePeer, signal);
-        break;
-      case 'answer':
-        await handleWebRTCAnswer(sourcePeer, signal);
-        break;
-      case 'candidate':
-        await handleWebRTCIce(sourcePeer, signal.candidate);
-        break;
+    try {
+      switch (signal.type) {
+        case 'offer':
+          await handleWebRTCOffer(sourcePeer, signal);
+          break;
+        case 'answer':
+          await handleWebRTCAnswer(sourcePeer, signal);
+          break;
+        case 'candidate':
+          await handleWebRTCIce(sourcePeer, signal.candidate);
+          break;
+      }
+    } catch (error) {
+      console.error('Error handling signal:', error);
     }
   };
 
   const cleanup = () => {
-    // Send goodbye message
-    if (wsRef.current && peerId) {
-      wsRef.current.send(JSON.stringify({
-        type: 'goodbye',
-        peerId: peerId
-      }));
+    // Send goodbye message if possible
+    if (wsRef.current && peerIdRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      try {
+        wsRef.current.send(JSON.stringify({
+          type: 'goodbye',
+          peerId: peerIdRef.current
+        }));
+      } catch (e) {
+        console.error('Error sending goodbye:', e);
+      }
       wsRef.current.close();
     }
     
-    if (heartbeatInterval.current) {
-      clearInterval(heartbeatInterval.current);
-    }
-    
-    connections.current.forEach(conn => conn.close());
+    // Close all WebRTC connections
+    connections.current.forEach(conn => {
+      try {
+        conn.close();
+      } catch (e) {
+        console.error('Error closing connection:', e);
+      }
+    });
     connections.current.clear();
     dataChannels.current.clear();
   };
@@ -153,12 +252,13 @@ export default function P2PApp() {
       return connections.current.get(remotePeerId);
     }
     
-    // Use a free public STUN server
+    // Use free public STUN servers
     const configuration = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' }
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' }
       ]
     };
     
@@ -180,6 +280,8 @@ export default function P2PApp() {
     
     connection.onconnectionstatechange = () => {
       const state = connection.connectionState;
+      console.log(`Connection state with ${remotePeerId}: ${state}`);
+      
       if (state === 'connected') {
         setPeers(prev => {
           const newPeers = new Map(prev);
@@ -202,7 +304,16 @@ export default function P2PApp() {
         });
         dataChannels.current.delete(remotePeerId);
         connections.current.delete(remotePeerId);
+        
+        // If active peer disconnected, clear active
+        if (activePeer === remotePeerId) {
+          setActivePeer(null);
+        }
       }
+    };
+    
+    connection.oniceconnectionstatechange = () => {
+      console.log(`ICE connection state: ${connection.iceConnectionState}`);
     };
     
     if (isInitiator) {
@@ -222,11 +333,29 @@ export default function P2PApp() {
 
     channel.onopen = () => {
       console.log(`Data channel opened with ${remotePeerId}`);
+      setPeers(prev => {
+        const newPeers = new Map(prev);
+        const peer = newPeers.get(remotePeerId);
+        if (peer) {
+          peer.status = 'connected';
+          newPeers.set(remotePeerId, peer);
+        }
+        return newPeers;
+      });
     };
 
     channel.onclose = () => {
       console.log(`Data channel closed with ${remotePeerId}`);
       dataChannels.current.delete(remotePeerId);
+      setPeers(prev => {
+        const newPeers = new Map(prev);
+        const peer = newPeers.get(remotePeerId);
+        if (peer) {
+          peer.status = 'available';
+          newPeers.set(remotePeerId, peer);
+        }
+        return newPeers;
+      });
     };
 
     channel.onmessage = (event) => {
@@ -236,8 +365,8 @@ export default function P2PApp() {
 
   // Handle data channel messages
   const handleDataChannelMessage = (data, remotePeerId) => {
-    if (typeof data === 'string') {
-      try {
+    try {
+      if (typeof data === 'string') {
         const parsedData = JSON.parse(data);
         if (parsedData.type === 'message') {
           setMessages(prev => {
@@ -247,7 +376,7 @@ export default function P2PApp() {
               id: Date.now(),
               text: parsedData.text,
               sender: 'remote',
-              timestamp: new Date().toLocaleTimeString()
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             }]);
             return newMessages;
           });
@@ -262,76 +391,91 @@ export default function P2PApp() {
             remotePeerId
           });
         }
-      } catch (error) {}
-    } else if (data instanceof ArrayBuffer) {
-      const view = new DataView(data);
-      const fileIdLen = view.getUint8(0);
-      let offset = 1;
-      const fileId = new TextDecoder().decode(new Uint8Array(data, offset, fileIdLen));
-      offset += fileIdLen;
-      const chunkIndex = view.getUint32(offset, true);
-      offset += 4;
-      const chunk = data.slice(offset);
-      const fileInfo = pendingFiles.current.get(fileId);
-      if (fileInfo) {
-        fileInfo.chunks[chunkIndex] = chunk;
-        fileInfo.receivedChunks++;
-        if (fileInfo.receivedChunks === fileInfo.totalChunks) {
-          const blob = new Blob(fileInfo.chunks, { type: fileInfo.type });
-          setFiles(prev => {
-            const newFiles = new Map(prev);
-            const peerFiles = newFiles.get(remotePeerId) || [];
-            newFiles.set(remotePeerId, [...peerFiles, {
-              id: fileId,
-              name: fileInfo.name,
-              size: fileInfo.size,
-              blob,
-              sender: 'remote',
-              timestamp: new Date().toLocaleTimeString()
-            }]);
-            return newFiles;
-          });
-          pendingFiles.current.delete(fileId);
+      } else if (data instanceof ArrayBuffer) {
+        const view = new DataView(data);
+        const fileIdLen = view.getUint8(0);
+        let offset = 1;
+        const fileIdBytes = new Uint8Array(data, offset, fileIdLen);
+        const fileId = new TextDecoder().decode(fileIdBytes);
+        offset += fileIdLen;
+        const chunkIndex = view.getUint32(offset, true);
+        offset += 4;
+        const chunk = data.slice(offset);
+        const fileInfo = pendingFiles.current.get(fileId);
+        if (fileInfo) {
+          fileInfo.chunks[chunkIndex] = chunk;
+          fileInfo.receivedChunks++;
+          if (fileInfo.receivedChunks === fileInfo.totalChunks) {
+            const blob = new Blob(fileInfo.chunks, { type: fileInfo.type });
+            setFiles(prev => {
+              const newFiles = new Map(prev);
+              const peerFiles = newFiles.get(remotePeerId) || [];
+              newFiles.set(remotePeerId, [...peerFiles, {
+                id: fileId,
+                name: fileInfo.name,
+                size: fileInfo.size,
+                blob,
+                sender: 'remote',
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+              }]);
+              return newFiles;
+            });
+            pendingFiles.current.delete(fileId);
+          }
         }
       }
+    } catch (error) {
+      console.error('Error handling data channel message:', error);
     }
   };
 
   // Handle WebRTC offer
   const handleWebRTCOffer = async (remotePeerId, offer) => {
-    const connection = await createConnection(remotePeerId, false);
-    await connection.setRemoteDescription(new RTCSessionDescription(offer));
-    const answer = await connection.createAnswer();
-    await connection.setLocalDescription(answer);
-    
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'signal',
-        targetPeer: remotePeerId,
-        signal: {
-          type: 'answer',
-          sdp: answer.sdp
-        }
-      }));
+    try {
+      const connection = await createConnection(remotePeerId, false);
+      await connection.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await connection.createAnswer();
+      await connection.setLocalDescription(answer);
+      
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'signal',
+          targetPeer: remotePeerId,
+          signal: {
+            type: 'answer',
+            sdp: answer.sdp
+          }
+        }));
+      }
+    } catch (error) {
+      console.error('Error handling WebRTC offer:', error);
     }
   };
 
   // Handle WebRTC answer
   const handleWebRTCAnswer = async (remotePeerId, answer) => {
-    const connection = connections.current.get(remotePeerId);
-    if (connection) {
-      await connection.setRemoteDescription(new RTCSessionDescription({
-        type: 'answer',
-        sdp: answer.sdp
-      }));
+    try {
+      const connection = connections.current.get(remotePeerId);
+      if (connection) {
+        await connection.setRemoteDescription(new RTCSessionDescription({
+          type: 'answer',
+          sdp: answer.sdp
+        }));
+      }
+    } catch (error) {
+      console.error('Error handling WebRTC answer:', error);
     }
   };
 
   // Handle WebRTC ICE candidate
   const handleWebRTCIce = async (remotePeerId, candidate) => {
-    const connection = connections.current.get(remotePeerId);
-    if (connection) {
-      await connection.addIceCandidate(new RTCIceCandidate(candidate));
+    try {
+      const connection = connections.current.get(remotePeerId);
+      if (connection && candidate) {
+        await connection.addIceCandidate(new RTCIceCandidate(candidate));
+      }
+    } catch (error) {
+      console.error('Error handling ICE candidate:', error);
     }
   };
 
@@ -342,22 +486,27 @@ export default function P2PApp() {
       return;
     }
 
-    const connection = await createConnection(remotePeerId, true);
-    const offer = await connection.createOffer();
-    await connection.setLocalDescription(offer);
-    
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'signal',
-        targetPeer: remotePeerId,
-        signal: {
-          type: 'offer',
-          sdp: offer.sdp
-        }
-      }));
+    try {
+      const connection = await createConnection(remotePeerId, true);
+      const offer = await connection.createOffer();
+      await connection.setLocalDescription(offer);
+      
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'signal',
+          targetPeer: remotePeerId,
+          signal: {
+            type: 'offer',
+            sdp: offer.sdp
+          }
+        }));
+      }
+      
+      setActivePeer(remotePeerId);
+    } catch (error) {
+      console.error('Error connecting to peer:', error);
+      alert('Failed to connect to peer. Please try again.');
     }
-    
-    setActivePeer(remotePeerId);
   };
 
   // Send message
@@ -382,7 +531,7 @@ export default function P2PApp() {
           id: Date.now(),
           text: message,
           sender: 'local',
-          timestamp: new Date().toLocaleTimeString()
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         }]);
         return newMessages;
       });
@@ -403,7 +552,7 @@ export default function P2PApp() {
       return;
     }
     const fileId = `${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
-    const chunkSize = 16 * 1024;
+    const chunkSize = 16 * 1024; // 16KB chunks
     const arrayBuffer = await file.arrayBuffer();
     const totalChunks = Math.ceil(arrayBuffer.byteLength / chunkSize);
     
@@ -435,7 +584,7 @@ export default function P2PApp() {
         payload.set(new Uint8Array(chunk), header.length);
         
         dataChannel.send(payload.buffer);
-        await new Promise(resolve => setTimeout(resolve, 5));
+        await new Promise(resolve => setTimeout(resolve, 5)); // Throttle sends
       }
       
       // Add to local file list
@@ -448,11 +597,12 @@ export default function P2PApp() {
           size: file.size,
           blob: file,
           sender: 'local',
-          timestamp: new Date().toLocaleTimeString()
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         }]);
         return newFiles;
       });
     } catch (error) {
+      console.error('Error sending file:', error);
       alert('Failed to send file. Connection may be unstable.');
     }
   };
@@ -489,7 +639,7 @@ export default function P2PApp() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'heartbeat',
-        peerId: peerId
+        peerId: peerIdRef.current
       }));
     }
     setTimeout(() => setIsScanning(false), 2000);
@@ -504,6 +654,20 @@ export default function P2PApp() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
+  // Connection status indicator
+  const connectionStatusIndicator = () => {
+    switch (connectionStatus) {
+      case 'connected':
+        return <span className="flex items-center"><span className="w-2 h-2 rounded-full bg-green-500 mr-2"></span>Connected</span>;
+      case 'connecting':
+        return <span className="flex items-center"><span className="w-2 h-2 rounded-full bg-yellow-500 mr-2"></span>Connecting...</span>;
+      case 'error':
+        return <span className="flex items-center"><span className="w-2 h-2 rounded-full bg-red-500 mr-2"></span>Connection Error</span>;
+      default:
+        return <span className="flex items-center"><span className="w-2 h-2 rounded-full bg-gray-500 mr-2"></span>Disconnected</span>;
+    }
+  };
+
   // Get current messages and files
   const currentMessages = activePeer ? messages.get(activePeer) || [] : [];
   const currentFiles = activePeer ? files.get(activePeer) || [] : [];
@@ -516,24 +680,35 @@ export default function P2PApp() {
       <div className="max-w-6xl mx-auto">
         {/* Header */}
         <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-          <div className="flex items-center justify-between mb-4">
-            <h1 className="text-3xl font-bold text-gray-800 flex items-center gap-2">
-              <Wifi className="text-blue-500" />
-              P2P File & Message Sharing
-            </h1>
-            <div className="flex items-center gap-2">
-              <div className="text-sm text-gray-600">Your ID:</div>
+          <div className="flex flex-col md:flex-row items-start md:items-center justify-between mb-4 gap-4">
+            <div>
+              <h1 className="text-3xl font-bold text-gray-800 flex items-center gap-2">
+                <Wifi className="text-blue-500" />
+                PeerFlow
+              </h1>
+              <p className="text-gray-600 text-sm mt-1">
+                Direct peer-to-peer file and message sharing
+              </p>
+            </div>
+            
+            <div className="flex flex-col items-end gap-2">
               <div className="flex items-center gap-2">
-                <code className="px-2 py-1 bg-gray-100 rounded text-sm font-mono">
-                  {peerId}
-                </code>
-                <button
-                  onClick={copyPeerId}
-                  className="p-1 text-gray-500 hover:text-gray-700"
-                  title="Copy ID"
-                >
-                  {copied ? <Check size={16} /> : <Copy size={16} />}
-                </button>
+                <div className="text-sm text-gray-600">Your ID:</div>
+                <div className="flex items-center gap-2">
+                  <code className="px-2 py-1 bg-gray-100 rounded text-sm font-mono">
+                    {peerId}
+                  </code>
+                  <button
+                    onClick={copyPeerId}
+                    className="p-1 text-gray-500 hover:text-gray-700"
+                    title="Copy ID"
+                  >
+                    {copied ? <Check size={16} /> : <Copy size={16} />}
+                  </button>
+                </div>
+              </div>
+              <div className="text-sm text-gray-600 flex items-center">
+                {connectionStatusIndicator()}
               </div>
             </div>
           </div>
@@ -608,7 +783,7 @@ export default function P2PApp() {
               )}
             </h2>
             
-            <div className="h-64 overflow-y-auto mb-4 border rounded-md p-3 bg-gray-50">
+            <div className="h-64 overflow-y-auto mb-4 border rounded-md p-3 bg-gray-50 flex flex-col gap-2">
               {!activePeer ? (
                 <p className="text-gray-500 text-center py-8">
                   Select a peer to start messaging
@@ -621,10 +796,10 @@ export default function P2PApp() {
                 currentMessages.map((msg) => (
                   <div
                     key={msg.id}
-                    className={`mb-3 p-2 rounded-md max-w-xs ${
+                    className={`p-3 rounded-lg max-w-xs ${
                       msg.sender === 'local'
-                        ? 'bg-blue-500 text-white ml-auto'
-                        : 'bg-white text-gray-800 border'
+                        ? 'bg-blue-500 text-white self-end'
+                        : 'bg-white text-gray-800 border self-start'
                     }`}
                   >
                     <p className="text-sm">{msg.text}</p>
@@ -751,32 +926,36 @@ export default function P2PApp() {
 
         {/* Instructions */}
         <div className="mt-6 bg-white rounded-lg shadow-lg p-6">
-          <h3 className="text-lg font-semibold text-gray-800 mb-3">How to Use</h3>
+          <h3 className="text-lg font-semibold text-gray-800 mb-3">How PeerFlow Works</h3>
           <div className="grid md:grid-cols-3 gap-4 text-sm text-gray-600">
-            <div>
-              <h4 className="font-medium text-gray-800 mb-2">Setup:</h4>
-              <ul className="space-y-1">
-                <li>• Start the signaling server: <code>node server.js</code></li>
-                <li>• Open app in multiple browsers/tabs</li>
-                <li>• Peers will appear automatically</li>
-              </ul>
-            </div>
             <div>
               <h4 className="font-medium text-gray-800 mb-2">Connection:</h4>
               <ul className="space-y-1">
-                <li>• Click on a peer to connect</li>
-                <li>• Green dot indicates active connection</li>
-                <li>• Works across devices on same network</li>
+                <li>• Signaling server coordinates connections</li>
+                <li>• WebRTC establishes direct peer-to-peer links</li>
+                <li>• No data passes through the server</li>
+              </ul>
+            </div>
+            <div>
+              <h4 className="font-medium text-gray-800 mb-2">Messaging:</h4>
+              <ul className="space-y-1">
+                <li>• Messages are encrypted end-to-end</li>
+                <li>• Sent directly between devices</li>
+                <li>• Works even without internet (on same network)</li>
               </ul>
             </div>
             <div>
               <h4 className="font-medium text-gray-800 mb-2">File Sharing:</h4>
               <ul className="space-y-1">
-                <li>• Select a peer and click "Share File"</li>
                 <li>• Files transfer directly between devices</li>
-                <li>• Download received files</li>
+                <li>• Large files supported with chunking</li>
+                <li>• No size limits (browser memory constraints)</li>
               </ul>
             </div>
+          </div>
+          
+          <div className="mt-4 text-xs text-gray-500 border-t pt-3">
+            <p>Status: {connectionStatus} | Device: {deviceType} | Your Name: {peerName}</p>
           </div>
         </div>
       </div>
