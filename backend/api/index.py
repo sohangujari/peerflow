@@ -7,20 +7,22 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Optional
 
+# Get port from environment variable or default to 8000
 PORT = int(os.getenv("PORT", 8000))
 
 app = FastAPI()
 
-# Enable CORS
+# Enable CORS for production and development
 origins = [
     "https://peerflow.vercel.app",
     "http://localhost:3000",
+    "http://localhost:8000",
     "https://localhost:3000",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,6 +33,7 @@ peers: Dict[str, Dict] = {}
 connections: Dict[str, WebSocket] = {}
 
 def format_peer_list() -> List[Dict]:
+    """Format the peer list for broadcasting"""
     return [
         {
             "id": peer_id,
@@ -43,6 +46,7 @@ def format_peer_list() -> List[Dict]:
     ]
 
 async def broadcast_peer_list():
+    """Broadcast updated peer list to all connected clients"""
     if not peers:
         return
         
@@ -55,12 +59,14 @@ async def broadcast_peer_list():
             print(f"Sent peer list to {peer_id}")
         except Exception as e:
             print(f"Error broadcasting to {peer_id}: {e}")
+            # Remove disconnected peer
             if peer_id in connections:
                 del connections[peer_id]
             if peer_id in peers:
                 del peers[peer_id]
 
 async def cleanup_inactive_peers():
+    """Periodically remove inactive peers"""
     while True:
         current_time = time.time()
         inactive_peers = []
@@ -83,7 +89,7 @@ async def cleanup_inactive_peers():
         if inactive_peers:
             await broadcast_peer_list()
         
-        await asyncio.sleep(10)
+        await asyncio.sleep(10)  # Check every 10 seconds
 
 @app.on_event("startup")
 async def startup_event():
@@ -93,6 +99,7 @@ async def startup_event():
 async def websocket_endpoint(websocket: WebSocket):
     # Accept all connections (Vercel handles origin validation)
     await websocket.accept()
+    print("WebSocket connection accepted")
     
     peer_id: Optional[str] = None
     is_registered = False
@@ -128,6 +135,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "peerId": peer_id,
                         "message": "Registration successful"
                     }))
+                    print(f"Registered peer: {peer_id}")
                     
                     await broadcast_peer_list()
                 
@@ -156,6 +164,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     break
                 
             except json.JSONDecodeError:
+                # Silently ignore JSON decode errors
                 pass
             except Exception as e:
                 print(f"Error processing message: {str(e)}")
@@ -170,14 +179,21 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         if peer_id and peer_id in connections:
             del connections[peer_id]
+            print(f"Cleaned up connection for peer: {peer_id}")
 
 @app.get("/")
 async def root():
     return {
         "message": "PeerFlow Signaling Server",
         "status": "running",
-        "peers": len(peers),
-        "connections": len(connections)
+        "endpoints": {
+            "websocket": "/ws",
+            "health_check": "/health"
+        },
+        "stats": {
+            "active_peers": len(peers),
+            "active_connections": len(connections)
+        }
     }
 
 @app.get("/health")
