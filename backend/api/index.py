@@ -7,22 +7,20 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Optional
 
-# Get port from environment variable or default to 8000
 PORT = int(os.getenv("PORT", 8000))
 
 app = FastAPI()
 
-# Enable CORS for production and development
+# Enable CORS
 origins = [
     "https://peerflow.vercel.app",
     "http://localhost:3000",
-    "http://localhost:8000",
     "https://localhost:3000",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -33,7 +31,6 @@ peers: Dict[str, Dict] = {}
 connections: Dict[str, WebSocket] = {}
 
 def format_peer_list() -> List[Dict]:
-    """Format the peer list for broadcasting"""
     return [
         {
             "id": peer_id,
@@ -46,7 +43,6 @@ def format_peer_list() -> List[Dict]:
     ]
 
 async def broadcast_peer_list():
-    """Broadcast updated peer list to all connected clients"""
     if not peers:
         return
         
@@ -65,7 +61,6 @@ async def broadcast_peer_list():
                 del peers[peer_id]
 
 async def cleanup_inactive_peers():
-    """Periodically remove inactive peers"""
     while True:
         current_time = time.time()
         inactive_peers = []
@@ -87,9 +82,6 @@ async def cleanup_inactive_peers():
         
         if inactive_peers:
             await broadcast_peer_list()
-        else:
-            # Broadcast peer list periodically even if no changes
-            await broadcast_peer_list()
         
         await asyncio.sleep(10)
 
@@ -99,22 +91,8 @@ async def startup_event():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    origin = websocket.headers.get("origin", "")
-    allowed_origins = [
-        "https://peerflow.vercel.app",
-        "http://localhost:3000",
-        "http://localhost:8000",
-        "https://localhost:3000",
-    ]
-    
-    ENV = os.getenv("ENV", "development")
-    if ENV == "production" and origin not in allowed_origins:
-        print(f"Rejected connection from unauthorized origin: {origin}")
-        await websocket.close(code=1008)
-        return
-    
+    # Accept all connections (Vercel handles origin validation)
     await websocket.accept()
-    print(f"WebSocket connection accepted from {origin}")
     
     peer_id: Optional[str] = None
     is_registered = False
@@ -135,7 +113,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         }))
                         continue
                     
-                    # Always update peer information
+                    # Register/update peer
                     peers[peer_id] = {
                         "name": message.get("info", {}).get("name", "Unknown"),
                         "deviceType": message.get("info", {}).get("deviceType", "desktop"),
@@ -150,7 +128,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         "peerId": peer_id,
                         "message": "Registration successful"
                     }))
-                    print(f"Registered peer: {peer_id}")
                     
                     await broadcast_peer_list()
                 
@@ -193,30 +170,19 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         if peer_id and peer_id in connections:
             del connections[peer_id]
-            print(f"Cleaned up connection for peer: {peer_id}")
 
 @app.get("/")
 async def root():
     return {
         "message": "PeerFlow Signaling Server",
         "status": "running",
-        "endpoints": {
-            "websocket": "/ws",
-            "health_check": "/health"
-        },
-        "stats": {
-            "active_peers": len(peers),
-            "active_connections": len(connections)
-        }
-    }
-
-@app.get("/health")
-def health_check():
-    return {
-        "status": "ok",
         "peers": len(peers),
         "connections": len(connections)
     }
 
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
+
 if __name__ == "__main__":
-    uvicorn.run("api.index:app", host="0.0.0.0", port=PORT, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")

@@ -27,36 +27,24 @@ export default function P2PApp() {
   const deviceTypeRef = useRef('');
   const reconnectAttempts = useRef(0);
 
-  // Generate memorable peer name
+  // Generate peer name (synchronous)
   const generatePeerName = () => {
     const colors = ['Red', 'Blue', 'Green', 'Yellow', 'Purple', 'Orange', 'Cyan', 'Magenta'];
     const animals = ['Lion', 'Tiger', 'Bear', 'Eagle', 'Wolf', 'Dolphin', 'Fox', 'Hawk'];
     const nature = ['Mountain', 'River', 'Forest', 'Ocean', 'Desert', 'Sky', 'Valley', 'Canyon'];
     
-    const randomCategory = Math.random() > 0.5 ? animals : nature;
-    const randomItem = randomCategory[Math.floor(Math.random() * randomCategory.length)];
+    const randomItem = Math.random() > 0.5 
+      ? animals[Math.floor(Math.random() * animals.length)]
+      : nature[Math.floor(Math.random() * nature.length)];
+    
     const randomColor = colors[Math.floor(Math.random() * colors.length)];
     
     return `${randomColor}${randomItem}`;
   };
 
-  // Detect device type
-  const detectDeviceType = () => {
-    const userAgent = navigator.userAgent.toLowerCase();
-    if (/mobile|android|iphone|phone|ipod|blackberry|iemobile/i.test(userAgent)) {
-      return 'mobile';
-    } else if (/tablet|ipad|playbook|silk/i.test(userAgent)) {
-      return 'tablet';
-    } else {
-      return 'laptop';
-    }
-  };
-
   // Handle server messages
   const handleServerMessage = (data) => {
     try {
-      console.log('Received server message:', data);
-      
       switch (data.type) {
         case 'peer-list':
           handlePeerList(data.peers);
@@ -65,11 +53,9 @@ export default function P2PApp() {
           handleSignal(data.sourcePeer, data.signal);
           break;
         case 'registered':
-          console.log('Registration confirmed by server');
           setWsError(null);
           break;
         case 'error':
-          console.error('Server error:', data.message);
           setWsError(`Server error: ${data.message}`);
           break;
         default:
@@ -85,15 +71,12 @@ export default function P2PApp() {
   const connectWebSocket = () => {
     setWsError(null);
     
-    // Improved URL detection
+    // Determine WebSocket URL
     let wsUrl;
     if (window.location.hostname === 'peerflow.vercel.app') {
       wsUrl = 'wss://peerflow-backend.vercel.app/ws';
-    } else if (window.location.hostname === 'localhost') {
-      wsUrl = window.location.protocol === 'https:' 
-        ? 'wss://localhost:8000/ws' 
-        : 'ws://localhost:8000/ws';
     } else {
+      // Local development
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       wsUrl = `${protocol}//${window.location.hostname}:8000/ws`;
     }
@@ -118,11 +101,15 @@ export default function P2PApp() {
         }
       };
       
-      // Send registration with retry logic
-      sendWithRetry(registrationData, () => {
+      // Send registration
+      try {
+        wsRef.current.send(JSON.stringify(registrationData));
         setPeerName(name);
         startHeartbeat();
-      });
+      } catch (error) {
+        console.error('Registration send error:', error);
+        setWsError('Failed to register with server');
+      }
     };
     
     wsRef.current.onmessage = (event) => {
@@ -150,44 +137,18 @@ export default function P2PApp() {
         heartbeatInterval.current = null;
       }
       
+      // Attempt reconnect
       if (!reconnectTimeout.current) {
         const delay = Math.min(3000 * Math.pow(2, reconnectAttempts.current), 30000);
         reconnectAttempts.current++;
         
         reconnectTimeout.current = setTimeout(() => {
-          console.log(`Attempting reconnect #${reconnectAttempts.current}...`);
+          console.log(`Reconnect attempt #${reconnectAttempts.current}`);
           reconnectTimeout.current = null;
           connectWebSocket();
         }, delay);
       }
     };
-  };
-
-  // Helper to send messages with retry
-  const sendWithRetry = (data, onSuccess, retries = 3, delay = 300) => {
-    if (!wsRef.current) return;
-    
-    const sendAttempt = (attempt = 0) => {
-      try {
-        if (wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify(data));
-          onSuccess?.();
-        } else if (attempt < retries) {
-          setTimeout(() => sendAttempt(attempt + 1), delay);
-        } else {
-          setWsError('Failed to send: WebSocket not ready');
-        }
-      } catch (error) {
-        if (attempt < retries) {
-          setTimeout(() => sendAttempt(attempt + 1), delay);
-        } else {
-          console.error('Final send error:', error);
-          setWsError(`Send failed: ${error.message}`);
-        }
-      }
-    };
-    
-    sendAttempt();
   };
 
   const startHeartbeat = () => {
@@ -196,19 +157,27 @@ export default function P2PApp() {
     }
     
     heartbeatInterval.current = setInterval(() => {
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && peerIdRef.current) {
-        sendWithRetry({
-          type: 'heartbeat',
-          peerId: peerIdRef.current
-        });
+      if (wsRef.current?.readyState === WebSocket.OPEN && peerIdRef.current) {
+        try {
+          wsRef.current.send(JSON.stringify({
+            type: 'heartbeat',
+            peerId: peerIdRef.current
+          }));
+        } catch (error) {
+          console.error('Heartbeat send error:', error);
+        }
       }
     }, 10000);
   };
 
   // Initialize peer
   useEffect(() => {
-    const id = `peer_${Math.random().toString(36).substr(2, 8)}`;
-    const device = detectDeviceType();
+    const id = `peer_${Math.random().toString(36).substring(2, 10)}`;
+    const device = /mobile/i.test(navigator.userAgent) 
+      ? 'mobile' 
+      : /tablet/i.test(navigator.userAgent) 
+        ? 'tablet' 
+        : 'desktop';
     
     peerIdRef.current = id;
     deviceTypeRef.current = device;
@@ -219,7 +188,21 @@ export default function P2PApp() {
     connectWebSocket();
     
     return () => {
-      cleanup();
+      // Cleanup
+      if (wsRef.current) {
+        try {
+          if (wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+              type: 'goodbye',
+              peerId: peerIdRef.current
+            }));
+          }
+          wsRef.current.close();
+        } catch (e) {
+          console.error('Cleanup error:', e);
+        }
+      }
+      
       if (heartbeatInterval.current) clearInterval(heartbeatInterval.current);
       if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
     };
@@ -232,7 +215,7 @@ export default function P2PApp() {
         newPeers.set(peer.id, {
           id: peer.id,
           name: peer.name,
-          deviceType: peer.deviceType || 'laptop',
+          deviceType: peer.deviceType || 'desktop',
           lastSeen: Date.now(),
           status: 'available'
         });
@@ -243,8 +226,6 @@ export default function P2PApp() {
 
   const handleSignal = async (sourcePeer, signal) => {
     try {
-      console.log('Received signal:', signal.type, 'from', sourcePeer);
-      
       switch (signal.type) {
         case 'offer':
           await handleWebRTCOffer(sourcePeer, signal);
@@ -260,28 +241,30 @@ export default function P2PApp() {
       }
     } catch (error) {
       console.error('Error handling signal:', error);
-      setWsError(`Signal handling error: ${error.message}`);
+      setWsError(`Signal error: ${error.message}`);
     }
   };
 
   const cleanup = () => {
-    if (wsRef.current && peerIdRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    if (wsRef.current && peerIdRef.current) {
       try {
-        wsRef.current.send(JSON.stringify({
-          type: 'goodbye',
-          peerId: peerIdRef.current
-        }));
+        if (wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            type: 'goodbye',
+            peerId: peerIdRef.current
+          }));
+        }
+        wsRef.current.close();
       } catch (e) {
-        console.error('Error sending goodbye:', e);
+        console.error('Cleanup error:', e);
       }
-      wsRef.current.close();
     }
     
     connections.current.forEach(conn => {
       try {
         conn.close();
       } catch (e) {
-        console.error('Error closing connection:', e);
+        console.error('Connection close error:', e);
       }
     });
     connections.current.clear();
@@ -295,10 +278,8 @@ export default function P2PApp() {
         return <Smartphone size={16} className="text-blue-500" />;
       case 'tablet':
         return <Tablet size={16} className="text-purple-500" />;
-      case 'laptop':
-        return <Monitor size={16} className="text-green-500" />;
       default:
-        return <Monitor size={16} className="text-gray-500" />;
+        return <Monitor size={16} className="text-green-500" />;
     }
   };
 
@@ -321,15 +302,15 @@ export default function P2PApp() {
     connections.current.set(remotePeerId, connection);
     
     connection.onicecandidate = (event) => {
-      if (event.candidate && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        sendWithRetry({
+      if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
           type: 'signal',
           targetPeer: remotePeerId,
           signal: {
             type: 'candidate',
             candidate: event.candidate
           }
-        });
+        }));
       }
     };
     
@@ -348,10 +329,6 @@ export default function P2PApp() {
           setActivePeer(null);
         }
       }
-    };
-    
-    connection.oniceconnectionstatechange = () => {
-      console.log(`ICE connection state: ${connection.iceConnectionState}`);
     };
     
     if (isInitiator) {
@@ -420,7 +397,7 @@ export default function P2PApp() {
         processFileChunk(data, remotePeerId);
       }
     } catch (error) {
-      console.error('Error handling data channel message:', error);
+      console.error('Data channel message error:', error);
     }
   };
 
@@ -484,19 +461,19 @@ export default function P2PApp() {
       const answer = await connection.createAnswer();
       await connection.setLocalDescription(answer);
       
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        sendWithRetry({
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
           type: 'signal',
           targetPeer: remotePeerId,
           signal: {
             type: 'answer',
             sdp: answer.sdp
           }
-        });
+        }));
       }
     } catch (error) {
-      console.error('Error handling WebRTC offer:', error);
-      setWsError(`Offer handling failed: ${error.message}`);
+      console.error('Offer handling error:', error);
+      setWsError(`Offer error: ${error.message}`);
     }
   };
 
@@ -511,8 +488,8 @@ export default function P2PApp() {
         }));
       }
     } catch (error) {
-      console.error('Error handling WebRTC answer:', error);
-      setWsError(`Answer handling failed: ${error.message}`);
+      console.error('Answer handling error:', error);
+      setWsError(`Answer error: ${error.message}`);
     }
   };
 
@@ -524,8 +501,8 @@ export default function P2PApp() {
         await connection.addIceCandidate(new RTCIceCandidate(candidate));
       }
     } catch (error) {
-      console.error('Error handling ICE candidate:', error);
-      setWsError(`ICE candidate failed: ${error.message}`);
+      console.error('ICE candidate error:', error);
+      setWsError(`ICE error: ${error.message}`);
     }
   };
 
@@ -541,20 +518,20 @@ export default function P2PApp() {
       const offer = await connection.createOffer();
       await connection.setLocalDescription(offer);
       
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        sendWithRetry({
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
           type: 'signal',
           targetPeer: remotePeerId,
           signal: {
             type: 'offer',
             sdp: offer.sdp
           }
-        });
+        }));
       }
       
       setActivePeer(remotePeerId);
     } catch (error) {
-      console.error('Error connecting to peer:', error);
+      console.error('Peer connection error:', error);
       setWsError(`Connection failed: ${error.message}`);
     }
   };
@@ -576,7 +553,7 @@ export default function P2PApp() {
       addMessage(activePeer, message, 'local');
       setMessage('');
     } catch (error) {
-      console.error('Error sending message:', error);
+      console.error('Message send error:', error);
       setWsError('Failed to send message. Connection may be unstable.');
     }
   };
@@ -590,7 +567,7 @@ export default function P2PApp() {
       return;
     }
     
-    const fileId = `${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+    const fileId = `${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
     const chunkSize = 16 * 1024;
     const arrayBuffer = await file.arrayBuffer();
     const totalChunks = Math.ceil(arrayBuffer.byteLength / chunkSize);
@@ -638,7 +615,7 @@ export default function P2PApp() {
         return newFiles;
       });
     } catch (error) {
-      console.error('Error sending file:', error);
+      console.error('File send error:', error);
       setWsError('Failed to send file. Connection may be unstable.');
     }
   };
@@ -672,11 +649,15 @@ export default function P2PApp() {
   // Refresh peers
   const refreshPeers = () => {
     setIsScanning(true);
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      sendWithRetry({
-        type: 'heartbeat',
-        peerId: peerIdRef.current
-      });
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      try {
+        wsRef.current.send(JSON.stringify({
+          type: 'heartbeat',
+          peerId: peerIdRef.current
+        }));
+      } catch (error) {
+        console.error('Refresh error:', error);
+      }
     }
     setTimeout(() => setIsScanning(false), 2000);
   };
