@@ -13,6 +13,7 @@ export default function P2PApp() {
   const [copied, setCopied] = useState(false);
   const [deviceType, setDeviceType] = useState('desktop');
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
+  const [wsError, setWsError] = useState(null);
   
   const connections = useRef(new Map());
   const dataChannels = useRef(new Map());
@@ -24,6 +25,7 @@ export default function P2PApp() {
   const peerIdRef = useRef('');
   const peerNameRef = useRef('');
   const deviceTypeRef = useRef('');
+  const reconnectAttempts = useRef(0);
 
   // Generate memorable peer name
   const generatePeerName = () => {
@@ -50,17 +52,50 @@ export default function P2PApp() {
     }
   };
 
+  // Handle server messages
+  const handleServerMessage = (data) => {
+    try {
+      console.log('Received server message:', data);
+      
+      switch (data.type) {
+        case 'peer-list':
+          handlePeerList(data.peers);
+          break;
+        case 'signal':
+          handleSignal(data.sourcePeer, data.signal);
+          break;
+        case 'registered':
+          console.log('Registration confirmed by server');
+          setWsError(null);
+          break;
+        case 'error':
+          console.error('Server error:', data.message);
+          setWsError(`Server error: ${data.message}`);
+          break;
+        default:
+          console.warn('Unknown message type:', data.type);
+      }
+    } catch (error) {
+      console.error('Error processing server message:', error);
+      setWsError('Invalid message format from server');
+    }
+  };
+
   // Connect to WebSocket server
   const connectWebSocket = () => {
-    // Determine WebSocket URL based on current host
-    let wsUrl;
+    setWsError(null);
     
+    // Improved URL detection
+    let wsUrl;
     if (window.location.hostname === 'peerflow.vercel.app') {
-      // Production URL (replace with your actual backend URL)
       wsUrl = 'wss://peerflow-backend.vercel.app/ws';
+    } else if (window.location.hostname === 'localhost') {
+      wsUrl = window.location.protocol === 'https:' 
+        ? 'wss://localhost:8000/ws' 
+        : 'ws://localhost:8000/ws';
     } else {
-      // Local development
-      wsUrl = 'ws://localhost:8000/ws';
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsUrl = `${protocol}//${window.location.hostname}:8000/ws`;
     }
     
     console.log(`Connecting to WebSocket: ${wsUrl}`);
@@ -70,64 +105,89 @@ export default function P2PApp() {
     wsRef.current.onopen = () => {
       console.log('WebSocket connected');
       setConnectionStatus('connected');
+      reconnectAttempts.current = 0;
       
-      // Register with signaling server
+      // Generate registration data
       const name = generatePeerName();
-      wsRef.current.send(JSON.stringify({
+      const registrationData = {
         type: 'register',
         peerId: peerIdRef.current,
         info: {
           name: name,
           deviceType: deviceTypeRef.current
         }
-      }));
+      };
       
-      setPeerName(name);
-      startHeartbeat();
+      // Send registration with retry logic
+      sendWithRetry(registrationData, () => {
+        setPeerName(name);
+        startHeartbeat();
+      });
     };
     
     wsRef.current.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        console.log('Received message:', data);
-        
-        switch (data.type) {
-          case 'peer-list':
-            handlePeerList(data.peers);
-            break;
-          case 'signal':
-            handleSignal(data.sourcePeer, data.signal);
-            break;
-        }
+        handleServerMessage(data);
       } catch (error) {
-        console.error('Error processing message:', error);
+        console.error('Error parsing message:', error);
+        setWsError('Invalid JSON from server');
       }
     };
     
     wsRef.current.onerror = (error) => {
       console.error('WebSocket error:', error);
       setConnectionStatus('error');
+      setWsError('WebSocket connection failed');
     };
     
     wsRef.current.onclose = (event) => {
       console.log('WebSocket closed:', event.code, event.reason);
       setConnectionStatus('disconnected');
       
-      // Clear existing heartbeat
       if (heartbeatInterval.current) {
         clearInterval(heartbeatInterval.current);
         heartbeatInterval.current = null;
       }
       
-      // Attempt reconnect after 3 seconds
       if (!reconnectTimeout.current) {
+        const delay = Math.min(3000 * Math.pow(2, reconnectAttempts.current), 30000);
+        reconnectAttempts.current++;
+        
         reconnectTimeout.current = setTimeout(() => {
-          console.log('Attempting to reconnect WebSocket...');
+          console.log(`Attempting reconnect #${reconnectAttempts.current}...`);
           reconnectTimeout.current = null;
           connectWebSocket();
-        }, 3000);
+        }, delay);
       }
     };
+  };
+
+  // Helper to send messages with retry
+  const sendWithRetry = (data, onSuccess, retries = 3, delay = 300) => {
+    if (!wsRef.current) return;
+    
+    const sendAttempt = (attempt = 0) => {
+      try {
+        if (wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify(data));
+          onSuccess?.();
+        } else if (attempt < retries) {
+          setTimeout(() => sendAttempt(attempt + 1), delay);
+        } else {
+          setWsError('Failed to send: WebSocket not ready');
+        }
+      } catch (error) {
+        if (attempt < retries) {
+          setTimeout(() => sendAttempt(attempt + 1), delay);
+        } else {
+          console.error('Final send error:', error);
+          setWsError(`Send failed: ${error.message}`);
+        }
+      }
+    };
+    
+    sendAttempt();
   };
 
   const startHeartbeat = () => {
@@ -137,12 +197,12 @@ export default function P2PApp() {
     
     heartbeatInterval.current = setInterval(() => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && peerIdRef.current) {
-        wsRef.current.send(JSON.stringify({
+        sendWithRetry({
           type: 'heartbeat',
           peerId: peerIdRef.current
-        }));
+        });
       }
-    }, 10000); // Send heartbeat every 10 seconds
+    }, 10000);
   };
 
   // Initialize peer
@@ -150,38 +210,29 @@ export default function P2PApp() {
     const id = `peer_${Math.random().toString(36).substr(2, 8)}`;
     const device = detectDeviceType();
     
-    // Set refs for consistent access
     peerIdRef.current = id;
     deviceTypeRef.current = device;
     
-    // Update state
     setPeerId(id);
     setDeviceType(device);
     
-    // Connect to WebSocket server
     connectWebSocket();
     
-    // Cleanup
     return () => {
       cleanup();
-      if (heartbeatInterval.current) {
-        clearInterval(heartbeatInterval.current);
-      }
-      if (reconnectTimeout.current) {
-        clearTimeout(reconnectTimeout.current);
-      }
+      if (heartbeatInterval.current) clearInterval(heartbeatInterval.current);
+      if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
     };
   }, []);
 
   const handlePeerList = (peerList) => {
     const newPeers = new Map();
     peerList.forEach(peer => {
-      // Don't add ourselves to the peer list
       if (peer.id !== peerIdRef.current) {
         newPeers.set(peer.id, {
           id: peer.id,
           name: peer.name,
-          deviceType: peer.deviceType || detectDeviceType(),
+          deviceType: peer.deviceType || 'laptop',
           lastSeen: Date.now(),
           status: 'available'
         });
@@ -204,14 +255,16 @@ export default function P2PApp() {
         case 'candidate':
           await handleWebRTCIce(sourcePeer, signal.candidate);
           break;
+        default:
+          console.warn('Unknown signal type:', signal.type);
       }
     } catch (error) {
       console.error('Error handling signal:', error);
+      setWsError(`Signal handling error: ${error.message}`);
     }
   };
 
   const cleanup = () => {
-    // Send goodbye message if possible
     if (wsRef.current && peerIdRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       try {
         wsRef.current.send(JSON.stringify({
@@ -224,7 +277,6 @@ export default function P2PApp() {
       wsRef.current.close();
     }
     
-    // Close all WebRTC connections
     connections.current.forEach(conn => {
       try {
         conn.close();
@@ -256,7 +308,6 @@ export default function P2PApp() {
       return connections.current.get(remotePeerId);
     }
     
-    // Use free public STUN servers
     const configuration = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -271,15 +322,14 @@ export default function P2PApp() {
     
     connection.onicecandidate = (event) => {
       if (event.candidate && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        console.log('Sending ICE candidate to', remotePeerId);
-        wsRef.current.send(JSON.stringify({
+        sendWithRetry({
           type: 'signal',
           targetPeer: remotePeerId,
           signal: {
             type: 'candidate',
             candidate: event.candidate
           }
-        }));
+        });
       }
     };
     
@@ -288,29 +338,12 @@ export default function P2PApp() {
       console.log(`Connection state with ${remotePeerId}: ${state}`);
       
       if (state === 'connected') {
-        setPeers(prev => {
-          const newPeers = new Map(prev);
-          const peer = newPeers.get(remotePeerId);
-          if (peer) {
-            peer.status = 'connected';
-            newPeers.set(remotePeerId, peer);
-          }
-          return newPeers;
-        });
+        updatePeerStatus(remotePeerId, 'connected');
       } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
-        setPeers(prev => {
-          const newPeers = new Map(prev);
-          const peer = newPeers.get(remotePeerId);
-          if (peer) {
-            peer.status = 'available';
-            newPeers.set(remotePeerId, peer);
-          }
-          return newPeers;
-        });
+        updatePeerStatus(remotePeerId, 'available');
         dataChannels.current.delete(remotePeerId);
         connections.current.delete(remotePeerId);
         
-        // If active peer disconnected, clear active
         if (activePeer === remotePeerId) {
           setActivePeer(null);
         }
@@ -322,16 +355,27 @@ export default function P2PApp() {
     };
     
     if (isInitiator) {
-      console.log('Creating data channel for', remotePeerId);
       const dataChannel = connection.createDataChannel('communication', { ordered: true });
       setupDataChannel(dataChannel, remotePeerId);
     } else {
       connection.ondatachannel = (event) => {
-        console.log('Received data channel from', remotePeerId);
         setupDataChannel(event.channel, remotePeerId);
       };
     }
     return connection;
+  };
+
+  // Update peer status
+  const updatePeerStatus = (peerId, status) => {
+    setPeers(prev => {
+      const newPeers = new Map(prev);
+      const peer = newPeers.get(peerId);
+      if (peer) {
+        peer.status = status;
+        newPeers.set(peerId, peer);
+      }
+      return newPeers;
+    });
   };
 
   // Setup data channel
@@ -340,29 +384,13 @@ export default function P2PApp() {
 
     channel.onopen = () => {
       console.log(`Data channel opened with ${remotePeerId}`);
-      setPeers(prev => {
-        const newPeers = new Map(prev);
-        const peer = newPeers.get(remotePeerId);
-        if (peer) {
-          peer.status = 'connected';
-          newPeers.set(remotePeerId, peer);
-        }
-        return newPeers;
-      });
+      updatePeerStatus(remotePeerId, 'connected');
     };
 
     channel.onclose = () => {
       console.log(`Data channel closed with ${remotePeerId}`);
       dataChannels.current.delete(remotePeerId);
-      setPeers(prev => {
-        const newPeers = new Map(prev);
-        const peer = newPeers.get(remotePeerId);
-        if (peer) {
-          peer.status = 'available';
-          newPeers.set(remotePeerId, peer);
-        }
-        return newPeers;
-      });
+      updatePeerStatus(remotePeerId, 'available');
     };
 
     channel.onmessage = (event) => {
@@ -376,19 +404,8 @@ export default function P2PApp() {
       if (typeof data === 'string') {
         const parsedData = JSON.parse(data);
         if (parsedData.type === 'message') {
-          setMessages(prev => {
-            const newMessages = new Map(prev);
-            const peerMessages = newMessages.get(remotePeerId) || [];
-            newMessages.set(remotePeerId, [...peerMessages, {
-              id: Date.now(),
-              text: parsedData.text,
-              sender: 'remote',
-              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            }]);
-            return newMessages;
-          });
+          addMessage(remotePeerId, parsedData.text, 'remote');
         } else if (parsedData.type === 'file-info') {
-          console.log('Received file info:', parsedData);
           pendingFiles.current.set(parsedData.fileId, {
             name: parsedData.name,
             size: parsedData.size,
@@ -400,75 +417,92 @@ export default function P2PApp() {
           });
         }
       } else if (data instanceof ArrayBuffer) {
-        const view = new DataView(data);
-        const fileIdLen = view.getUint8(0);
-        let offset = 1;
-        const fileIdBytes = new Uint8Array(data, offset, fileIdLen);
-        const fileId = new TextDecoder().decode(fileIdBytes);
-        offset += fileIdLen;
-        const chunkIndex = view.getUint32(offset, true);
-        offset += 4;
-        const chunk = data.slice(offset);
-        const fileInfo = pendingFiles.current.get(fileId);
-        
-        if (fileInfo) {
-          console.log(`Received chunk ${chunkIndex} of ${fileInfo.totalChunks} for ${fileId}`);
-          fileInfo.chunks[chunkIndex] = chunk;
-          fileInfo.receivedChunks++;
-          
-          if (fileInfo.receivedChunks === fileInfo.totalChunks) {
-            console.log('All chunks received for', fileId);
-            const blob = new Blob(fileInfo.chunks, { type: fileInfo.type });
-            setFiles(prev => {
-              const newFiles = new Map(prev);
-              const peerFiles = newFiles.get(remotePeerId) || [];
-              newFiles.set(remotePeerId, [...peerFiles, {
-                id: fileId,
-                name: fileInfo.name,
-                size: fileInfo.size,
-                blob,
-                sender: 'remote',
-                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-              }]);
-              return newFiles;
-            });
-            pendingFiles.current.delete(fileId);
-          }
-        }
+        processFileChunk(data, remotePeerId);
       }
     } catch (error) {
       console.error('Error handling data channel message:', error);
     }
   };
 
+  // Add message to state
+  const addMessage = (peerId, text, sender) => {
+    setMessages(prev => {
+      const newMessages = new Map(prev);
+      const peerMessages = newMessages.get(peerId) || [];
+      newMessages.set(peerId, [...peerMessages, {
+        id: Date.now(),
+        text,
+        sender,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      }]);
+      return newMessages;
+    });
+  };
+
+  // Process file chunk
+  const processFileChunk = (data, remotePeerId) => {
+    const view = new DataView(data);
+    const fileIdLen = view.getUint8(0);
+    let offset = 1;
+    const fileIdBytes = new Uint8Array(data, offset, fileIdLen);
+    const fileId = new TextDecoder().decode(fileIdBytes);
+    offset += fileIdLen;
+    const chunkIndex = view.getUint32(offset, true);
+    offset += 4;
+    const chunk = data.slice(offset);
+    const fileInfo = pendingFiles.current.get(fileId);
+    
+    if (fileInfo) {
+      fileInfo.chunks[chunkIndex] = chunk;
+      fileInfo.receivedChunks++;
+      
+      if (fileInfo.receivedChunks === fileInfo.totalChunks) {
+        const blob = new Blob(fileInfo.chunks, { type: fileInfo.type });
+        setFiles(prev => {
+          const newFiles = new Map(prev);
+          const peerFiles = newFiles.get(remotePeerId) || [];
+          newFiles.set(remotePeerId, [...peerFiles, {
+            id: fileId,
+            name: fileInfo.name,
+            size: fileInfo.size,
+            blob,
+            sender: 'remote',
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          }]);
+          return newFiles;
+        });
+        pendingFiles.current.delete(fileId);
+      }
+    }
+  };
+
   // Handle WebRTC offer
   const handleWebRTCOffer = async (remotePeerId, offer) => {
     try {
-      console.log('Handling offer from', remotePeerId);
       const connection = await createConnection(remotePeerId, false);
       await connection.setRemoteDescription(new RTCSessionDescription(offer));
       const answer = await connection.createAnswer();
       await connection.setLocalDescription(answer);
       
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
+        sendWithRetry({
           type: 'signal',
           targetPeer: remotePeerId,
           signal: {
             type: 'answer',
             sdp: answer.sdp
           }
-        }));
+        });
       }
     } catch (error) {
       console.error('Error handling WebRTC offer:', error);
+      setWsError(`Offer handling failed: ${error.message}`);
     }
   };
 
   // Handle WebRTC answer
   const handleWebRTCAnswer = async (remotePeerId, answer) => {
     try {
-      console.log('Handling answer from', remotePeerId);
       const connection = connections.current.get(remotePeerId);
       if (connection) {
         await connection.setRemoteDescription(new RTCSessionDescription({
@@ -478,19 +512,20 @@ export default function P2PApp() {
       }
     } catch (error) {
       console.error('Error handling WebRTC answer:', error);
+      setWsError(`Answer handling failed: ${error.message}`);
     }
   };
 
   // Handle WebRTC ICE candidate
   const handleWebRTCIce = async (remotePeerId, candidate) => {
     try {
-      console.log('Handling ICE candidate from', remotePeerId);
       const connection = connections.current.get(remotePeerId);
       if (connection && candidate) {
         await connection.addIceCandidate(new RTCIceCandidate(candidate));
       }
     } catch (error) {
       console.error('Error handling ICE candidate:', error);
+      setWsError(`ICE candidate failed: ${error.message}`);
     }
   };
 
@@ -502,26 +537,25 @@ export default function P2PApp() {
     }
 
     try {
-      console.log('Connecting to peer:', remotePeerId);
       const connection = await createConnection(remotePeerId, true);
       const offer = await connection.createOffer();
       await connection.setLocalDescription(offer);
       
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
+        sendWithRetry({
           type: 'signal',
           targetPeer: remotePeerId,
           signal: {
             type: 'offer',
             sdp: offer.sdp
           }
-        }));
+        });
       }
       
       setActivePeer(remotePeerId);
     } catch (error) {
       console.error('Error connecting to peer:', error);
-      alert('Failed to connect to peer. Please try again.');
+      setWsError(`Connection failed: ${error.message}`);
     }
   };
 
@@ -531,7 +565,7 @@ export default function P2PApp() {
     
     const dataChannel = dataChannels.current.get(activePeer);
     if (!dataChannel || dataChannel.readyState !== 'open') {
-      alert('Not connected to peer. Please wait for connection to establish.');
+      setWsError('Not connected to peer. Please wait for connection to establish.');
       return;
     }
     
@@ -539,23 +573,11 @@ export default function P2PApp() {
     
     try {
       dataChannel.send(JSON.stringify(messageObj));
-      
-      setMessages(prev => {
-        const newMessages = new Map(prev);
-        const peerMessages = newMessages.get(activePeer) || [];
-        newMessages.set(activePeer, [...peerMessages, {
-          id: Date.now(),
-          text: message,
-          sender: 'local',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        }]);
-        return newMessages;
-      });
-      
+      addMessage(activePeer, message, 'local');
       setMessage('');
     } catch (error) {
       console.error('Error sending message:', error);
-      alert('Failed to send message. Connection may be unstable.');
+      setWsError('Failed to send message. Connection may be unstable.');
     }
   };
 
@@ -564,17 +586,16 @@ export default function P2PApp() {
     if (!file || !activePeer) return;
     const dataChannel = dataChannels.current.get(activePeer);
     if (!dataChannel || dataChannel.readyState !== 'open') {
-      alert('Not connected to peer. Please wait for connection to establish.');
+      setWsError('Not connected to peer. Please wait for connection to establish.');
       return;
     }
     
     const fileId = `${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
-    const chunkSize = 16 * 1024; // 16KB chunks
+    const chunkSize = 16 * 1024;
     const arrayBuffer = await file.arrayBuffer();
     const totalChunks = Math.ceil(arrayBuffer.byteLength / chunkSize);
     
     try {
-      // Send file info
       dataChannel.send(JSON.stringify({
         type: 'file-info',
         fileId,
@@ -584,9 +605,6 @@ export default function P2PApp() {
         totalChunks
       }));
       
-      console.log(`Sending file: ${file.name} (${totalChunks} chunks)`);
-      
-      // Send file chunks
       for (let i = 0; i < totalChunks; i++) {
         const start = i * chunkSize;
         const end = Math.min(start + chunkSize, arrayBuffer.byteLength);
@@ -603,12 +621,9 @@ export default function P2PApp() {
         payload.set(new Uint8Array(chunk), header.length);
         
         dataChannel.send(payload.buffer);
-        await new Promise(resolve => setTimeout(resolve, 5)); // Throttle sends
+        await new Promise(resolve => setTimeout(resolve, 5));
       }
       
-      console.log('File sent successfully');
-      
-      // Add to local file list
       setFiles(prev => {
         const newFiles = new Map(prev);
         const peerFiles = newFiles.get(activePeer) || [];
@@ -624,7 +639,7 @@ export default function P2PApp() {
       });
     } catch (error) {
       console.error('Error sending file:', error);
-      alert('Failed to send file. Connection may be unstable.');
+      setWsError('Failed to send file. Connection may be unstable.');
     }
   };
 
@@ -658,10 +673,10 @@ export default function P2PApp() {
   const refreshPeers = () => {
     setIsScanning(true);
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
+      sendWithRetry({
         type: 'heartbeat',
         peerId: peerIdRef.current
-      }));
+      });
     }
     setTimeout(() => setIsScanning(false), 2000);
   };
@@ -733,6 +748,12 @@ export default function P2PApp() {
               </div>
             </div>
           </div>
+          
+          {wsError && (
+            <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
+              {wsError}
+            </div>
+          )}
         </div>
 
         <div className="grid lg:grid-cols-3 gap-6">
