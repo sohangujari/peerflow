@@ -7,6 +7,14 @@
   ],
   "routes": [
     {
+      "src": "/ws",
+      "dest": "api/index.py",
+      "headers": {
+        "Connection": "Upgrade",
+        "Upgrade": "websocket"
+      }
+    },
+    {
       "src": "/(.*)",
       "dest": "api/index.py"
     }
